@@ -1,0 +1,3 @@
+[submodule "experiment_framework_bic"]
+	path = experiment_framework_bic
+	url = https://github.com/RuhaoT/experiment_framework_bic.git

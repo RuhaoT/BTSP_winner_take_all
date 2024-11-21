@@ -1,0 +1,10 @@
+# To Ruhao:
+
+In this task, we aim to investigate the impact of winner-take-all (WTA) circuits on the memory capacity of the original BTSP networks. To achieve this, simulate the input completion tasks as described in Figure 5 of my previous paper.
+
+What you need to do:
+
+Test several winner numbers (e.g., as a ratio of n * fq such as 0.5, 1, 2, and 4) and record the performance.
+Incorporate the top-k mechanism into the Hebbian feedback connection learning process and compare its performance against the baseline.
+Finally, report a 3D plot of HD ratios for the two setups.
+ Note: You may encount the memory overflow issue. Consider using float16 precision to reduce memory costs or report to us directly.
