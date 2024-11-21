@@ -1,7 +1,10 @@
 """This experiment replicates and further explores the experiment of Figure 5
 in the paper "One-shot learning and robust recall with BTSP, a biological
-synaptic plasticity rule" by Yujie Wu, et al. (2024). We intend to explore the
-effect of changing the top-k parameter in the BTSP feedback network.
+synaptic plasticity rule" by Yujie Wu, et al. (2024). We intend to explore: 1.the
+effect of changing the top-k parameter in the BTSP feedback network. 2. the
+performance comparison between doing BTSP-Hebbian co-learning at per-pattern level
+and entire dataset level.
+
 """
 
 import os
@@ -12,7 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from experiment_framework_bic.auto_experiment import auto_experiment
-from experiment_framework_bic.utils import logging, parameterization
+from experiment_framework_bic.utils import logging, parameterization, layers
+from custom_networks import b_h_network, btsp_step_topk, hebbian_step
 
 @dataclasses.dataclass
 class MetaParams:
@@ -23,6 +27,7 @@ class MetaParams:
     precision: str = "half"
     device: str = "cuda"
     experiment_index: int = -1
+    batch_size: int | list = 30
 
     # network parameters
     input_size: int | list = 200
@@ -30,10 +35,6 @@ class MetaParams:
     btsp_fq: float | list = 0.005
     btsp_topk_ratio_nfq: float | list = 0.5
     fw: float | list = 0.6  # connection ratio
-    hebbian_topk_ratio_range_mfp: tuple[float, float] | list[tuple[float, float]] = (
-        0.5,
-        1.5,
-    )
 
     # data parameters
     pattern_num: int | list = 10
@@ -48,16 +49,13 @@ class ResultInfo:
     # num_images: int
     # masked_ratio: float
     # opt_thr_ca1: pa.int64
-    real_var: pa.float64
-    opt_hebbian_topk: pa.int64
+    opt_thr_ca3: pa.int64
     opt_err: pa.float64
-    opt_var: pa.float64
     zab: pa.float64
     hdistance_x_x_masked: pa.float64
     # opt_thr_ca1_control: pa.int64
     opt_thr_ca3_control: pa.int64
     opt_err_control: pa.float64
-    opt_var_control: pa.float64
 
     experiment_index: pa.int64 = -1
 
@@ -76,7 +74,6 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
             btsp_fq=0.005,
             btsp_topk_ratio_nfq=0.5,
             fw=0.6,
-            hebbian_topk_ratio_range_mfp=(0.5, 1.5),
             pattern_num=1000,
             fp=0.005,
             mask_ratio=0.3,
@@ -88,19 +85,18 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
             precision="half",
             device="cuda",
             experiment_index=-1,
-            input_size=2500,
-            output_dim=3900,
-            btsp_fq=0.01,
-            btsp_topk_ratio_nfq=[0.01, 0.05, 0.1, 0.5, 1.0],
+            input_size=2e4,
+            output_dim=1.5e4,
+            btsp_fq=0.005,
+            btsp_topk_ratio_nfq=0.75,
             fw=1,
-            hebbian_topk_ratio_range_mfp=(0.1, 15),
-            pattern_num=[100, 200, 300, 400],
+            pattern_num=np.arange(100, 30000, 1000).tolist(),
             fp=0.005,
-            mask_ratio=[0.1, 0.2, 0.3],
+            mask_ratio=np.linspace(0.1, 1, 10).tolist(),
         )
 
         self.data_folder = "data"
-        self.experiment_name = "debug_experiment_btsp_feedback_topk"
+        self.experiment_name = "btsp_hebbian_learning_stratergy"
         self.experiment_folder = logging.init_experiment_folder(
             data_folder=self.data_folder,
             experiment_name=self.experiment_name,
@@ -152,8 +148,8 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
         p_w = parameters.fw
         device = parameters.device
         masked_ratio = parameters.mask_ratio
-        btsp_topk = int(parameters.btsp_topk_ratio_nfq * n * fq)
-        hebbian_topk_ratio_range_mfp = parameters.hebbian_topk_ratio_range_mfp
+        # btsp_topk = int(parameters.btsp_topk_ratio_nfq * n * fq)
+        btsp_topk = int(n*fq_half*0.75)
 
         # set precision
         if parameters.precision == "half":
@@ -216,8 +212,47 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
         W_back = W_back_init * W_mask2.T
         del W_mask1, W_mask2, W_back_init, W_feed_init
         torch.cuda.empty_cache()
-        # training complete
-
+        # training dataset-level BTSP-Hebbian network completed
+        
+        # train a BTSP-Hebbian network with pattern-level learning for comparison
+        pattern_level_network = b_h_network.BHNetwork(
+            b_h_network.BHNetworkParams(
+                btsp_step_topk_forward=btsp_step_topk.BTSPStepTopKNetworkParams(
+                    layers.BTSPLayerParams(
+                        parameters.input_size,
+                        parameters.output_dim,
+                        parameters.btsp_fq,
+                        parameters.fw,
+                        parameters.device,
+                    ),
+                    layers.TopKLayerParams(
+                        btsp_topk,
+                    ),
+                    layers.StepLayerParams(
+                        1e-5,
+                    )
+                ),
+                hebbian_step_feedback=hebbian_step.HebbianStepNetworkParams(
+                    layers.HebbianLayerParams(
+                        input_dim=parameters.output_dim, # feedback layer input size
+                        output_dim=parameters.input_size,
+                        device=parameters.device,
+                        dtype=precison,
+                    ),
+                    layers.StepLayerParams(
+                        0,
+                    ),
+                ),
+            )
+        )
+        
+        # batch split & learning
+        batches = torch.split(X, parameters.batch_size)
+        for batch in batches:
+            pattern_level_network.learn_and_forward(batch)
+        # all training completed
+        
+        # testing
         # Mask the top half of the patterns and project the results using Wf
         X_masked = X.clone()
         X_masked[:, : int(m * masked_ratio)] = 0
@@ -243,34 +278,27 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
         # feedback
         X_projected = y_ @ W_back
 
-        average_firing_neuron = parameters.fp * m
-        # for debugging
-        real_average_firing_neuron = X.sum(1).mean()
-        read_var = X.sum(1).var().item()
-        # print the difference ratio
-        # print((average_firing_neuron - real_average_firing_neuron) / real_average_firing_neuron)
-        average_firing_neuron = real_average_firing_neuron
-        hebbian_topk_max = int(average_firing_neuron * hebbian_topk_ratio_range_mfp[1])
-        hebbian_topk_min = int(average_firing_neuron * hebbian_topk_ratio_range_mfp[0])
-        steps = int((hebbian_topk_max - hebbian_topk_min) / 100) + 1
-        for hebbian_topk in range(hebbian_topk_min, hebbian_topk_max, steps):
-            # apply topk selection on the projected results
-            _, topk_indices = torch.topk(X_projected, k=hebbian_topk, dim=1)
-            mask = torch.zeros_like(X_projected, dtype=torch.bool)
-            mask.scatter_(dim=1, index=topk_indices, value=True)
-            tmp = mask.float()
+        # grid search for the optimal threshold
+        if X_projected.max() > 200:
+            max_range = 200
+        else:
+            max_range = max(X_projected.max(), 2)
+        steps = int(max_range / 100) + 1
+        for thr_ca3 in range(0, max_range, steps):
+            tmp = (X_projected >= thr_ca3).float()
             err0 = (tmp - X).abs().mean()
-            var = tmp.sum(1).var()
-            items = [hebbian_topk, err0.item(), var.item()]
+            var = tmp.sum(1).var() # no need, but keep it in case of future use
+            items = [thr_ca3, err0.item(), var.item()]
             reconstruct_results.append(items)
+
         reconstruct_array = np.array(reconstruct_results)
 
         # print(reconstruct_array,max_range,steps )
         idx_min_err = reconstruct_array[:, 1].argmin()
-        opt_hebbian_topk, opt_err, opt_var = reconstruct_array[idx_min_err][:3]
+        opt_thr_ca3, opt_err = reconstruct_array[idx_min_err][:2]
 
         ###
-        # control_model: BTSP-Hebbian without feedback Top-k selection
+        # control_model: BTSP-Hebbian pattern-level learning
         ###
         reconstruct_control = []
         # can directly use the X projected by BTSP layer
@@ -290,22 +318,19 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
 
         reconstruct_control_array = np.array(reconstruct_control)
         idx_min_err = reconstruct_control_array[:, 1].argmin()
-        opt_thr_ca3_control, opt_err_control, opt_var_control = reconstruct_control_array[idx_min_err][
-            :3
+        opt_thr_ca3_control, opt_err_control = reconstruct_control_array[idx_min_err][
+            :2
         ]
 
         err1 = err1.item()
 
         record_items = ResultInfo(
-            real_var=read_var,
-            opt_hebbian_topk=opt_hebbian_topk,
+            opt_thr_ca3=opt_thr_ca3,
             opt_err=opt_err,
-            opt_var=opt_var,
             zab=zab,
             hdistance_x_x_masked=err1,
             opt_thr_ca3_control=opt_thr_ca3_control,
             opt_err_control=opt_err_control,
-            opt_var_control=opt_var_control,
             experiment_index=parameters.experiment_index,
         )
         record_items_dict = logging.dict_elements_to_tuple(
@@ -349,27 +374,29 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
         # figure with 2 subplots
         # 1. pattern_num vs masked_ratio vs opt_err
         # 2. pattern_num vs masked_ratio vs opt_err_control
-        fig, axs = plt.subplots(1, 3, figsize=(17, 5), subplot_kw={"projection": "3d"})
+        fig, axs = plt.subplots(1, 2, figsize=(12, 5), subplot_kw={"projection": "3d"})
         # the width of the subplots are 5 inches, the extra 2 inches are for color bar
         # create a coolwarm color mapping from 0 to 1
         color_map = "coolwarm"
-        norm = plt.Normalize(0, 100)
-        for ax, df, title in zip(
+        norm = plt.Normalize(0, 1)
+        for ax, df, zbar,title in zip(
             axs,
-            [opt_err_min_df, opt_err_min_df, opt_err_control_min_df],
-            ["real_var","opt_var", "opt_var_control"],
-            ["Real Pattern Activation Variance", "Optimal TopK Reconstructed Pattern Activation Variance", "Optimal Grid Search Recontsructed Pattern Activation Variance Control"],
+            [opt_err_min_df, opt_err_control_min_df],
+            ["opt_err", "opt_err_control"],
+            ["Dataset Level Learning Reconstruction Error", "Pattern Level Learning Reconstruction Error"],
         ):
             ax.set_title(title)
-            ax.set_xlabel("pattern_num")
-            ax.set_ylabel("mask_ratio")
-            x = df["pattern_num"]
-            y = df["mask_ratio"]
-            # z = df[title] / df["hdistance_x_x_masked"]
-            z = df[title]
+            ax.set_ylabel("pattern_num")
+            ax.set_xlabel("mask_ratio")
+            y = df["pattern_num"]
+            x = df["mask_ratio"]
+            z = df[zbar] / df["hdistance_x_x_masked"]
+            # z = df[zbar]
             # truncate z to 1
-            # z = np.minimum(z, 1)
+            z = np.minimum(z, 1)
             ax.plot_trisurf(x, y, z, cmap=color_map, norm=norm)
+            # invert the x axis
+            ax.invert_xaxis()
 
         # add color bar to the right of the rightmost subplot
         sm = plt.cm.ScalarMappable(cmap=color_map, norm=norm)
