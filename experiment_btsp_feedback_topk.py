@@ -139,9 +139,9 @@ class ExperimentBTSPFeedbackTopK(auto_experiment.ExperimentInterface):
     def execute_experiment_process(self, parameters: MetaParams, dataset):
         """Core experiment process."""
 
-        num_images = parameters.pattern_num
-        m = parameters.input_size
-        n = parameters.output_dim
+        num_images = int(parameters.pattern_num)
+        m = int(parameters.input_size)
+        n = int(parameters.output_dim)
         fq = parameters.btsp_fq
         fq_half = fq / 2
         fp = parameters.fp
